@@ -1,0 +1,500 @@
+x264最新代码移植到VS2010的步骤以及说明
+
+x624官方网站下载最新稳定版源码（x264-snapshot-20121130-2245-stable）以及最后一个包含VC工程的版本（x264-snapshot-20091006-2245.tar）。下载地址：ftp://ftp.videolan.org/pub/videolan/x264/snapshots/
+
+
+将20091006中的build/win32目录中的VC工程文件拷贝到20121130相同目录中。使用VS2010打开x264.sln，将新源码文件加入到工程中，libx264工程主要包括：common/x86/bitstream-a.asm, common/x86/const-a.asm, common/bitstream.h, common/osdep.h, common/rectangle.h, common/threadpool.h, common/win32thread.h, common/bitsteam.c, common/mvpred.c, common/osdep.c, common/threadpool.c, common/win32thread.c。
+x264工程主要包括filters,input,output三个文件夹下的相关内容。注意添加汇编文件时还需编辑build customisation，使用yasm工具进行链接。可以使用UltraEdit直接打开libx264.vcxproj，然后找到汇编文件所在位置进行添加。
+
+
+libx264 Win32 Debug 预定义宏
+_DEBUG;_LIB;WIN32;__X264__;HAVE_MMX=1;__SSE__;ARCH_X86=1;SYS_WINDOWS=1;HAVE_STDINT_H=1;HAVE_THREAD=1;HAVE_WIN32THREAD=1;HAVE_INTERLACED=1;X264_CHROMA_FORMAT=0;PTW32_STATIC_LIB=0;HAVE_GPL=1
+
+libx264 Win32 Release 预定义宏
+NDEBUG;_LIB;WIN32;__X264__;HAVE_MMX=1;__SSE__;ARCH_X86=1;SYS_WINDOWS=1;HAVE_STDINT_H=1;HAVE_THREAD=1;HAVE_WIN32THREAD=1;HAVE_INTERLACED=1;X264_CHROMA_FORMAT=0;PTW32_STATIC_LIB=0;HAVE_GPL=1;_CRT_SECURE_NO_WARNINGS
+
+x264 Win32 Debug 预定义宏
+_DEBUG;_CONSOLE;WIN32;__X264__;HAVE_MMX=1;SYS_WINDOWS=1;HAVE_STDINT_H=1;HAVE_GPL=1;HAVE_THREAD=1;HAVE_INTERLACED=1;X264_CHROMA_FORMAT=0;PTW32_STATIC_LIB=0;%(PreprocessorDefinitions)
+
+x264 Win32 Release 预定义宏
+NDEBUG;_CONSOLE;WIN32;__X264__;HAVE_MMX=1;SYS_WINDOWS=1;HAVE_STDINT_H=1;HAVE_GPL=1;HAVE_THREAD=1;HAVE_INTERLACED=1;X264_CHROMA_FORMAT=0;PTW32_STATIC_LIB=0;_CRT_SECURE_NO_WARNINGS;
+
+
+修改汇编文件中的预定义宏条件判断。主要涉及以下宏：ARCH_X86_64, WIN64, UNIX64, HIGH_BIT_DEPTH
+%if XXX        --> %ifdef XXX
+%if XXX == 0   --> %ifndef XXX
+%elif XXX      --> %elifdef XXX
+%elif XXX == 0 --> %elifndef XXX
+
+特殊汇编代码修改：
+predict-a.asm line 1082
+%if ARCH_X86_64 == 0 && HIGH_BIT_DEPTH == 0
+......
+%endif ; !ARCH_X86_64 && !HIGH_BIT_DEPTH
+
+修改为：
+%ifndef ARCH_X86_64
+
+%ifndef HIGH_BIT_DEPTH
+......
+%endif ; !HIGH_BIT_DEPTH
+
+%endif ; !ARCH_X86_64
+
+
+quant-a.asm line 491
+%if HIGH_BIT_DEPTH == 0 && notcpuflag(avx)
+
+......
+%endif ; !HIGH_BIT_DEPTH && !AVX
+修改为：
+%ifndef HIGH_BIT_DEPTH
+
+%if notcpuflag(avx)
+......
+%endif ; !AVX
+
+%endif ; !HIGH_BIT_DEPTH
+
+
+mc-a.asm line 1668
+%if HIGH_BIT_DEPTH && mmsize == 16
+    WIN64_SPILL_XMM 8
+%endif
+修改为：
+%ifdef HIGH_BIT_DEPTH
+
+%if mmsize == 16
+    WIN64_SPILL_XMM 8
+%endif
+
+%endif
+
+注意：汇编代码的链接是使用外部工具程序yasm.exe，因此工程中C代码定义的宏以及工程配置中预定义的宏都对汇编代码无效。
+汇编代码的宏定义必须在CustomBuild中定义，比如BIT_DEPTH的定义如下：
+yasm -I..\..\common\x86\ -f win32 -O2 -DPREFIX -DNON_MOD16_STACK=1 -DBIT_DEPTH=8 -o "$(IntDir)%(Filename)".obj "%(FullPath)"
+汇编代码中定义的函数都将以x264_xxx的形式对外导出，供C语言代码进行调用。此处的定义在x86inc.asm中有说明。
+
+
+修改C文件中相关代码
+
+/common/common.h
+line 125 - 140
+typedef struct { uint64_t i[2]; } x264_uint128_t;
+
+typedef union { x264_uint128_t i; uint64_t a[2]; uint32_t b[4]; uint16_t c[8]; uint8_t d[16]; } MAY_ALIAS x264_union128_t;
+#define M128(src) (((x264_union128_t*)(src))->i)
+
+#define M128_ZERO ((x264_uint128_t){{0,0}})
+修改为：
+#ifdef _MSC_VER
+typedef __m128 x264_union128_t;
+#define M128(src) (*(__m128*)(src))
+#define M128_ZERO _mm_setzero_ps()
+#else
+typedef struct { uint64_t i[2]; } x264_uint128_t;
+typedef union { x264_uint128_t i; uint64_t a[2]; uint32_t b[4]; uint16_t c[8]; uint8_t d[16]; } MAY_ALIAS x264_union128_t;
+#define M128(src) (((x264_union128_t*)(src))->i)
+#define M128_ZERO ((x264_uint128_t){{0,0}})
+#endif
+
+/common/cpu.h 
+line 37 - 47
+#if HAVE_MMX
+
+/* There is no way to forbid the compiler from using float instructions
+
+ * before the emms so miscompilation could theoretically occur in the
+
+ * unlikely event that the compiler reorders emms and float instructions.
+ */
+
+#if HAVE_X86_INLINE_ASM
+
+/* Clobbering memory makes the compiler less likely to reorder code. */
+
+#define x264_emms() asm volatile( "emms":::"memory","st","st(1)","st(2)", \
+
+                                  "st(3)","st(4)","st(5)","st(6)","st(7)" )
+
+#else
+
+#define x264_emms() x264_cpu_emms()
+
+#endif
+
+#else
+
+#define x264_emms()
+
+#endif
+
+#define x264_sfence x264_cpu_sfence
+修改为：
+#if HAVE_MMX
+/* There is no way to forbid the compiler from using float instructions
+ * before the emms so miscompilation could theoretically occur in the
+ * unlikely event that the compiler reorders emms and float instructions. */
+#ifdef _MSC_VER
+#define x264_emms _m_empty
+#define x264_sfence _mm_sfence
+void _m_empty(void);
+void _mm_sfence(void);
+#elif HAVE_X86_INLINE_ASM
+/* Clobbering memory makes the compiler less likely to reorder code. */
+#define x264_emms() asm volatile( "emms":::"memory","st","st(1)","st(2)", \
+                                  "st(3)","st(4)","st(5)","st(6)","st(7)" )
+#define x264_sfence() asm volatile("sfence\n\t")
+#else
+#define x264_emms() x264_cpu_emms()
+#define x264_sfence() x264_cpu_sfence()
+#endif // HAVE_X86_INLINE_ASM
+#else
+#define x264_emms()
+#define x264_sfence()
+#endif // HAVE_MMX
+
+
+#if ARCH_X86 && HAVE_MMX
+
+int x264_stack_align( void (*func)(), ... );
+
+#define x264_stack_align(func,...) x264_stack_align((void (*)())func, __VA_ARGS__)
+
+#else
+
+#define x264_stack_align(func,...) func(__VA_ARGS__)
+
+#endif
+修改为：
+#if ARCH_X86 && HAVE_MMX && !defined(_MSC_VER)
+int x264_stack_align( void (*func)(), ... );
+#define x264_stack_align(func,...) x264_stack_align((void (*)())func, __VA_ARGS__)
+#else
+#define x264_stack_align(func,...) func(__VA_ARGS__)
+#endif
+
+
+/common/osdep.h
+#include "config.h"
+修改为：
+#ifndef _MSC_VER
+
+#include "config.h"
+
+#endif
+
+
+#include <inttypes.h>
+修改为：
+#if HAVE_STDINT_H
+#include <stdint.h>
+#endif
+#if defined(_MSC_VER) || !HAVE_STDINT_H
+#include <inttypes.h>
+#endif
+
+#ifdef __ICL
+#define inline __inline
+
+#define strcasecmp _stricmp
+
+#define strncasecmp _strnicmp
+
+#define snprintf _snprintf
+
+#define strtok_r strtok_s
+
+#define S_ISREG(x) (((x) & S_IFMT) == S_IFREG)
+
+#endif
+修改为：
+#if defined(__ICL) || defined(_MSC_VER)
+
+#define inline __inline
+
+#define strcasecmp _stricmp
+
+#define strncasecmp _strnicmp
+
+#define snprintf _snprintf
+
+#define strtok_r strtok_s
+
+#define S_ISREG(x) (((x) & S_IFMT) == S_IFREG)
+
+#endif
+
+
+增加：
+#ifdef _MSC_VER
+#define fseek _fseeki64
+#define ftell _ftelli64
+#define isfinite _finite
+#define _CRT_SECURE_NO_DEPRECATE
+#endif
+
+
+#ifdef __ICL
+#define DECLARE_ALIGNED( var, n ) __declspec(align(n)) var
+
+#else
+
+#define DECLARE_ALIGNED( var, n ) var __attribute__((aligned(n)))
+
+#endif
+修改为：
+#if defined(__ICL) || defined(_MSC_VER)
+
+#define DECLARE_ALIGNED( var, n ) __declspec(align(n)) var
+
+#else
+
+#define DECLARE_ALIGNED( var, n ) var __attribute__((aligned(n)))
+
+#endif
+
+
+#define ALIGNED_ARRAY_32( ... ) EXPAND( ALIGNED_ARRAY_EMU( 31, __VA_ARGS__ ) )
+
+#define ALIGNED_ARRAY_64( ... ) EXPAND( ALIGNED_ARRAY_EMU( 63, __VA_ARGS__ ) )
+修改为：
+#ifdef _MSC_VER
+#define ALIGNED_32( var )  DECLARE_ALIGNED( var, 32 )
+#define ALIGNED_64( var )  DECLARE_ALIGNED( var, 64 )
+#define ALIGNED_ARRAY_32( type, name, sub1, ... ) ALIGNED_32( type name sub1 __VA_ARGS__ )
+#define ALIGNED_ARRAY_64( type, name, sub1, ... ) ALIGNED_64( type name sub1 __VA_ARGS__ )
+#else
+#define ALIGNED_ARRAY_32( ... ) ALIGNED_ARRAY_EMU( 31, __VA_ARGS__ )
+#define ALIGNED_ARRAY_64( ... ) ALIGNED_ARRAY_EMU( 63, __VA_ARGS__ )
+#endif
+
+#if !HAVE_LOG2F
+
+#define log2f(x) (logf(x)/0.693147180559945f)
+
+#define log2(x) (log(x)/0.693147180559945)
+
+#endif
+修改为：
+#if !HAVE_LOG2F
+#ifdef _MSC_VER
+float __inline log2f(const float x)
+{
+    __asm {
+        fld1
+        fld DWORD PTR x
+        fyl2x
+    }
+}
+double __inline log2(const double x)
+{
+    __asm {
+        fld1
+        fld QWORD PTR x
+        fyl2x
+    }
+}
+#else
+#define log2f(x) (logf(x)*1.4426950408889634f)
+#define log2(x) (log(x)*1.4426950408889634)
+#endif
+#endif
+
+
+增加：
+#if !defined(_WIN64) && !defined(__LP64__) && defined(_MSC_VER)
+#define BROKEN_STACK_ALIGNMENT 1 /* define it if stack is not mod16 */
+#endif
+
+增加：
+#elif defined(_MSC_VER)
+#define endian_fix32(x) _byteswap_ulong(x)
+#define endian_fix16(x) _rotr16(x,8)
+
+
+static ALWAYS_INLINE uint16_t endian_fix16( uint16_t x )
+{
+    return (x<<8)|(x>>8);
+}
+修改为：
+#ifndef endian_fix16
+static ALWAYS_INLINE uint16_t endian_fix16( uint16_t x )
+{
+    return (x<<8)|(x>>8);
+}
+#endif
+
+
+增加：
+#elif defined(_MSC_VER) && defined(_WIN32)
+int inline x264_clz( const uint32_t x )
+{
+    uint32_t r;
+    _BitScanReverse(&r,x);
+    return r^31;
+}
+int inline x264_ctz( const uint32_t x )
+{
+    uint32_t r;
+    _BitScanForward(&r,x);
+    return r;
+}
+
+
+增加：
+#elif defined(_MSC_VER)
+#define x264_prefetch(x) _mm_prefetch((const char*)(x), _MM_HINT_T0)
+
+
+增加：
+#ifdef _MSC_VER
+#include <xmmintrin.h>
+
+#define X264_BIT_DEPTH 8
+#define HIGH_BIT_DEPTH 0
+
+int32_t inline lrintf(const float x)
+{
+    return _mm_cvt_ss2si(_mm_load_ss(&x));
+}
+
+int32_t inline lrint(const double x)
+{
+    int32_t r;
+    __asm fld QWORD PTR x
+    __asm fistp DWORD PTR r
+    return r;
+}
+
+int64_t inline llrint(const double x)
+{
+    int64_t r;
+    __asm fld QWORD PTR x
+    __asm fistp QWORD PTR r
+    return r;
+}
+#endif
+
+
+/common/util.h
+
+#undef M128_ZERO
+#define M128_ZERO ((__m128){0,0,0,0})
+#define x264_union128_t x264_union128_sse_t
+typedef union { __m128 i; uint64_t a[2]; uint32_t b[4]; uint16_t c[8]; uint8_t d[16]; } MAY_ALIAS x264_union128_sse_t;
+#if HAVE_VECTOREXT
+typedef uint32_t v4si __attribute__((vector_size (16)));
+#endif
+
+修改为：
+#ifndef _MSC_VER
+#undef M128_ZERO
+#define M128_ZERO ((__m128){0,0,0,0})
+#define x264_union128_t x264_union128_sse_t
+typedef union { __m128 i; uint64_t a[2]; uint32_t b[4]; uint16_t c[8]; uint8_t d[16]; } MAY_ALIAS x264_union128_sse_t;
+#if HAVE_VECTOREXT
+typedef uint32_t v4si __attribute__((vector_size (16)));
+#endif
+#endif // _MSC_VER
+
+
+增加_MSC_VER下的四个函数定义
+x264_median_mv
+x264_predictor_difference
+x264_cabac_mvd_sum
+x264_predictor_roundclip
+
+/common/x86/predict-c.c
+
+#if HAVE_X86_INLINE_ASM
+#if HIGH_BIT_DEPTH
+static void x264_predict_16x16_p_sse2( uint16_t *src )
+#else
+static void x264_predict_16x16_p_ssse3( uint8_t *src )
+#endif
+修改为：
+#if HAVE_X86_INLINE_ASM || defined(_MSC_VER)
+#if HIGH_BIT_DEPTH
+static void x264_predict_16x16_p_sse2( uint16_t *src )
+#else
+static void x264_predict_16x16_p_ssse3( uint8_t *src )
+#endif
+
+
+#if HAVE_X86_INLINE_ASM
+
+    pf[I_PRED_16x16_P]       = x264_predict_16x16_p_sse2;
+
+#endif
+修改为：
+#if HAVE_X86_INLINE_ASM || defined(_MSC_VER)
+    pf[I_PRED_16x16_P]       = x264_predict_16x16_p_sse2;
+#endif
+
+
+#if HAVE_X86_INLINE_ASM
+
+    pf[I_PRED_16x16_P]       = x264_predict_16x16_p_ssse3;
+
+#endif
+修改为：
+#if HAVE_X86_INLINE_ASM || defined(_MSC_VER)
+    pf[I_PRED_16x16_P]       = x264_predict_16x16_p_ssse3;
+#endif
+
+
+/input/timecode.c
+增加：
+#ifdef _MSC_VER
+double inline round(double d)
+{
+    __asm fld d
+    __asm frndint
+}
+#endif
+
+/extras/getopt.c
+# if HAVE_STRING_H
+#  include <string.h>
+# else
+#  include <strings.h>
+# endif
+修改为：
+# if HAVE_STRING_H || defined(_MSC_VER)
+#  include <string.h>
+# else
+#  include <strings.h>
+# endif
+
+
+/x264.c
+增加：
+#elif defined(_MSC_VER)
+    printf( "MSVC %u.%u\n",_MSC_VER/100,_MSC_VER%100);
+
+
+/x264.h
+#include "x264_config.h"
+修改为：
+#ifndef _MSC_VER
+#include "x264_config.h"
+#endif
+
+
+
+由于MS的VS编译器对C99标准支持不好，不支持函数当中混合定义、声明变量。
+解决办法：在函数开头统一定义变量。此处需要修改大量C文件。
+
+为了解除第三方库的依赖问题。x264工程移除了/input/avs.c, /input/ffms.c, /input/lavf.c, /output/mp4.c。
+
+
+x264工程中的input和output目录中各有一个raw.c文件，在VS2010中编译时产生冲突，提示“unresolved external symbol: _raw_input ”。因为分别改名为rawinput.c和rawoutput.c。
+
+关于数值类型转换：
+osdep.h中定义了三个转换函数，内部使用了MMX指令进行加速，因此只适用于_MSC_VER宏
+lrintf：float转换为int32
+lrint：double转换为int32
+llrint：double转换为int64
+目前有约20处代码可以替换为使用此类转换函数。
+
